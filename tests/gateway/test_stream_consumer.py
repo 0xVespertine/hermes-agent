@@ -55,6 +55,20 @@ class TestCleanForDisplay:
         assert "MEDIA:" not in result
         assert "Here are two files:" in result
 
+    def test_docx_media_paths_stripped(self):
+        """WhatsApp-style document delivery directives are not visible text."""
+        text = (
+            "C'est pret.\n\n"
+            "MEDIA:/home/plume/workspace/users/Ghita/dossiers/YAHAKIM/exports/"
+            "Contrat_de_bail_YAHAKIM_transfert_siege.docx\n\n"
+            "MEDIA:/home/plume/workspace/users/Ghita/dossiers/YAHAKIM/exports/"
+            "PV_AGE_transfert_siege_YAHAKIM.docx"
+        )
+        result = GatewayStreamConsumer._clean_for_display(text)
+        assert result == "C'est pret."
+        assert "MEDIA:" not in result
+        assert "/home/plume" not in result
+
     def test_excessive_newlines_collapsed(self):
         """Blank lines left by removed tags are collapsed."""
         text = "Before\n\n\nMEDIA:/tmp/file.png\n\n\nAfter"

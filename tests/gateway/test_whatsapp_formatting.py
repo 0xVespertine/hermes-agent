@@ -7,11 +7,22 @@ Covers:
 """
 
 import asyncio
+import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from gateway.config import Platform
+from gateway.platforms.base import SendResult
+
+
+class _ClientTimeout:
+    def __init__(self, *args, **kwargs):
+        pass
+
+
+sys.modules.setdefault("aiohttp", SimpleNamespace(ClientTimeout=_ClientTimeout))
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +300,70 @@ class TestSendChunking:
         result = await adapter.send("chat1", "hello")
         assert not result.success
         assert "Not connected" in result.error
+
+    @pytest.mark.asyncio
+    async def test_media_directive_stripped_from_text_and_uploaded(self, tmp_path):
+        adapter = _make_adapter()
+        doc = tmp_path / "Contrat_de_bail_YAHAKIM_transfert_siege.docx"
+        doc.write_bytes(b"docx")
+        resp = MagicMock(status=200)
+        resp.json = AsyncMock(return_value={"messageId": "text1"})
+        adapter._http_session.post = MagicMock(return_value=_AsyncCM(resp))
+        adapter.send_document = AsyncMock(
+            return_value=SendResult(success=True, message_id="doc1")
+        )
+
+        result = await adapter.send(
+            "chat1",
+            f"C'est pret.\n\nMEDIA:{doc}",
+        )
+
+        assert result.success
+        payload = adapter._http_session.post.call_args.kwargs["json"]
+        assert payload["message"] == "C'est pret."
+        assert "MEDIA:" not in payload["message"]
+        adapter.send_document.assert_awaited_once_with(
+            chat_id="chat1",
+            file_path=str(doc),
+        )
+
+    @pytest.mark.asyncio
+    async def test_media_only_directive_uploads_without_text_bubble(self, tmp_path):
+        adapter = _make_adapter()
+        doc = tmp_path / "PV_AGE_transfert_siege_YAHAKIM.docx"
+        doc.write_bytes(b"docx")
+        adapter.send_document = AsyncMock(
+            return_value=SendResult(success=True, message_id="doc1")
+        )
+
+        result = await adapter.send("chat1", f"MEDIA:{doc}")
+
+        assert result.success
+        adapter._http_session.post.assert_not_called()
+        adapter.send_document.assert_awaited_once_with(
+            chat_id="chat1",
+            file_path=str(doc),
+        )
+
+    @pytest.mark.asyncio
+    async def test_protected_media_example_is_not_visible_or_uploaded(self):
+        adapter = _make_adapter()
+        resp = MagicMock(status=200)
+        resp.json = AsyncMock(return_value={"messageId": "text1"})
+        adapter._http_session.post = MagicMock(return_value=_AsyncCM(resp))
+        adapter.send_document = AsyncMock()
+
+        result = await adapter.send(
+            "chat1",
+            "Example:\n```text\nMEDIA:/home/plume/private/export.docx\n```\nDone.",
+        )
+
+        assert result.success
+        payload = adapter._http_session.post.call_args.kwargs["json"]
+        assert "MEDIA:" not in payload["message"]
+        assert "/home/plume" not in payload["message"]
+        assert "Done." in payload["message"]
+        adapter.send_document.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

@@ -186,8 +186,10 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
     SUPPORTED_DOCUMENT_TYPES,
+    _strip_media_directives,
     cache_image_from_url,
     cache_audio_from_url,
+    should_send_media_as_audio,
 )
 
 
@@ -926,44 +928,93 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if bridge_exit:
             return SendResult(success=False, error=bridge_exit)
 
-        if not content or not content.strip():
+        media_files = []
+        if content and (
+            "MEDIA:" in content
+            or "[[audio_as_voice]]" in content
+            or "[[as_document]]" in content
+        ):
+            media_files, content = self.extract_media(content)
+            media_files = self.filter_media_delivery_paths(media_files)
+            content = _strip_media_directives(content).strip()
+
+        if (not content or not content.strip()) and not media_files:
             return SendResult(success=True, message_id=None)
 
         try:
             import aiohttp
 
-            # Format and chunk the message
-            formatted = self.format_message(content)
-            chunks = self.truncate_message(formatted, self._outgoing_chunk_limit())
-
             last_message_id = None
-            for chunk in chunks:
-                payload: Dict[str, Any] = {
-                    "chatId": chat_id,
-                    "message": chunk,
-                }
-                if reply_to and last_message_id is None:
-                    # Only reply-to on the first chunk
-                    payload["replyTo"] = reply_to
+            if content and content.strip():
+                # Format and chunk the message
+                formatted = self.format_message(content)
+                chunks = self.truncate_message(formatted, self._outgoing_chunk_limit())
 
-                async with self._http_session.post(
-                    f"http://127.0.0.1:{self._bridge_port}/send",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        last_message_id = data.get("messageId")
-                    else:
-                        error = await resp.text()
-                        return SendResult(success=False, error=error)
+                for chunk in chunks:
+                    payload: Dict[str, Any] = {
+                        "chatId": chat_id,
+                        "message": chunk,
+                    }
+                    if reply_to and last_message_id is None:
+                        # Only reply-to on the first chunk
+                        payload["replyTo"] = reply_to
 
-                # Small delay between chunks to avoid rate limiting
-                if len(chunks) > 1:
-                    await asyncio.sleep(0.3)
+                    async with self._http_session.post(
+                        f"http://127.0.0.1:{self._bridge_port}/send",
+                        json=payload,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            last_message_id = data.get("messageId")
+                        else:
+                            error = await resp.text()
+                            return SendResult(success=False, error=error)
+
+                    # Small delay between chunks to avoid rate limiting
+                    if len(chunks) > 1:
+                        await asyncio.sleep(0.3)
+
+            media_delivered = False
+            _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
+            _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+            for media_path, is_voice in media_files:
+                ext = Path(media_path).suffix.lower()
+                if should_send_media_as_audio(self.platform, ext, is_voice=is_voice):
+                    media_result = await self.send_voice(
+                        chat_id=chat_id,
+                        audio_path=media_path,
+                    )
+                elif ext in _VIDEO_EXTS:
+                    media_result = await self.send_video(
+                        chat_id=chat_id,
+                        video_path=media_path,
+                    )
+                elif ext in _IMAGE_EXTS:
+                    media_result = await self.send_image_file(
+                        chat_id=chat_id,
+                        image_path=media_path,
+                    )
+                else:
+                    media_result = await self.send_document(
+                        chat_id=chat_id,
+                        file_path=media_path,
+                    )
+                if not media_result.success:
+                    logger.warning(
+                        "[whatsapp] Failed to send extracted media %s: %s",
+                        media_path,
+                        media_result.error,
+                    )
+                    if not last_message_id:
+                        return media_result
+                    continue
+                media_delivered = True
+                if media_result.message_id:
+                    last_message_id = media_result.message_id
 
             return SendResult(
-                success=True,
+                success=True if last_message_id or media_delivered else bool(content),
                 message_id=last_message_id,
             )
         except Exception as e:
