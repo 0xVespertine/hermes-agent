@@ -157,6 +157,9 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # installed on demand like every other messaging platform; also exposed
     # as the `teams` extra in pyproject for packagers / explicit installs.
     "platform.teams": ("microsoft-teams-apps==2.0.13.4", "aiohttp==3.13.4"),
+    # WhatsApp adapter — uses aiohttp to poll the local Node.js bridge HTTP
+    # health/send endpoints.  Also exposed as the `whatsapp` extra in pyproject.
+    "platform.whatsapp": ("aiohttp==3.13.4",),
 
     # ─── Terminal backends ─────────────────────────────────────────────────
     "terminal.modal": ("modal==1.3.4",),
