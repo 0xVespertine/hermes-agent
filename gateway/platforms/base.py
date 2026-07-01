@@ -2408,11 +2408,17 @@ class BasePlatformAdapter(ABC):
                 ingress_window_config,
             )
         )
+        # The hard cap bounds only the TOTAL batch length, so it gets a higher
+        # ceiling than the per-message window: large multi-file uploads (e.g.
+        # several multi-MB scans that download serially before batching) need
+        # >5s to fully coalesce into one turn. The window itself stays clamped
+        # to 5s so single idle messages aren't over-delayed.
         self._ingress_batch_hard_cap_seconds = _clamp_seconds(
             _float_env(
                 "HERMES_GATEWAY_INGRESS_BATCH_HARD_CAP_SECONDS",
                 ingress_hard_cap_config,
-            )
+            ),
+            maximum=60.0,
         )
         if (
             self._ingress_batch_seconds > 0
