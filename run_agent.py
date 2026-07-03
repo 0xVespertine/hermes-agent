@@ -1649,9 +1649,17 @@ class AIAgent:
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
+
+        Trailing empty-response scaffolding is dropped from the live list in
+        place (it is ephemeral junk the real transcript should shed). The
+        persist user-message *override* is NOT applied here — it is resolved
+        inside ``_flush_messages_to_session_db`` and written only to the DB row,
+        never mutating the live message list used by the API call (#48677 is
+        thus closed for every persist caller, not just this one).
         """
+        # Scaffolding removal mutates the live list (desired — ephemeral
+        # retry/failure sentinels must not survive into the real transcript).
         self._drop_trailing_empty_response_scaffolding(messages)
-        self._apply_persist_user_message_override(messages)
         self._session_messages = messages
         self._save_session_log(messages)
         self._flush_messages_to_session_db(messages, conversation_history)
@@ -1742,7 +1750,18 @@ class AIAgent:
             return
         if not self._session_db:
             return
-        self._apply_persist_user_message_override(messages)
+        # Persist user-message override (#48677 chokepoint): historically this
+        # mutated the live `messages` list in place, which — on the early
+        # crash-resilience persist that runs BEFORE the API call is built —
+        # stripped observed group-chat context off the live user message and
+        # silently dropped it. Instead, resolve the override here and apply it
+        # ONLY to the value written to the DB (see the write loop below); the
+        # live dict is never mutated, so every caller (early persist, mid-loop
+        # flush, /resume, /branch) is protected uniformly. Timestamp override is
+        # metadata and is likewise applied only to the written row.
+        _ov_idx = getattr(self, "_persist_user_message_idx", None)
+        _ov_content = getattr(self, "_persist_user_message_override", None)
+        _ov_timestamp = getattr(self, "_persist_user_message_timestamp", None)
         try:
             # Retry row creation if the earlier attempt failed transiently.
             if not self._session_db_created:
@@ -1784,7 +1803,7 @@ class AIAgent:
                 if isinstance(item, dict)
             }
 
-            for msg in messages:
+            for _msg_idx, msg in enumerate(messages):
                 if not isinstance(msg, dict):
                     continue
                 # Never write ephemeral recovery scaffolding to the session
@@ -1808,6 +1827,16 @@ class AIAgent:
                     continue
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
+                _row_timestamp = msg.get("timestamp")
+                # Apply the persist override to THIS row's written values only
+                # (never to the live dict). Match the original guard: text-only
+                # content is replaced; multimodal (list) content is left intact
+                # so image/audio blocks aren't clobbered by the text override.
+                if _ov_idx == _msg_idx and msg.get("role") == "user":
+                    if _ov_content is not None and not isinstance(content, list):
+                        content = _ov_content
+                    if _ov_timestamp is not None:
+                        _row_timestamp = _ov_timestamp
                 # Persist multimodal tool results as their text summary only —
                 # base64 images would bloat the session DB and aren't useful
                 # for cross-session replay.
@@ -1843,7 +1872,7 @@ class AIAgent:
                     reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
-                    timestamp=msg.get("timestamp"),
+                    timestamp=_row_timestamp,
                 )
                 msg[_DB_PERSISTED_MARKER] = True
             # The intrinsic markers are now the sole source of truth. Reset the
@@ -3855,13 +3884,13 @@ class AIAgent:
         return False
 
     @staticmethod
-    def _build_keepalive_http_client(base_url: str = "") -> Any:
+    def _build_keepalive_http_client(base_url: str = "", *, verify: Any = True) -> Any:
         try:
             import httpx as _httpx
             import socket as _socket
 
             if "api.githubcopilot.com" in str(base_url or "").lower():
-                return _httpx.Client()
+                return _httpx.Client(verify=verify)
 
             _sock_opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
             if hasattr(_socket, "TCP_KEEPIDLE"):
@@ -3875,8 +3904,10 @@ class AIAgent:
             # Explicitly read proxy settings while still honoring NO_PROXY for
             # loopback / local endpoints such as a locally hosted sub2api.
             _proxy = _get_proxy_for_base_url(base_url)
+            # verify lives on the transport: httpx ignores the client-level
+            # ``verify`` when a custom ``transport=`` is supplied.
             return _httpx.Client(
-                transport=_httpx.HTTPTransport(socket_options=_sock_opts),
+                transport=_httpx.HTTPTransport(socket_options=_sock_opts, verify=verify),
                 proxy=_proxy,
             )
         except Exception:
@@ -4081,7 +4112,7 @@ class AIAgent:
         #
         # When an agent is using a non-singleton credential — e.g. a manual
         # pool entry (``hermes auth add xai-oauth``) whose tokens belong to
-        # a different account than the loopback_pkce singleton, or an agent
+        # a different account than the device_code singleton, or an agent
         # constructed with an explicit ``api_key=`` arg — force-refreshing
         # the singleton here and adopting its tokens silently re-routes the
         # rest of the conversation onto the singleton's account.  The
@@ -4183,6 +4214,43 @@ class AIAgent:
         if not self._replace_primary_openai_client(reason="nous_credential_refresh"):
             return False
 
+        return True
+
+    def _try_refresh_vertex_client_credentials(self) -> bool:
+        """Re-mint the Vertex OAuth2 access token and rebuild the OpenAI client.
+
+        Vertex tokens live ~1 hour. On a long-lived agent (gateway session) a
+        cached client's bearer token will expire mid-session, producing a 401.
+        This re-resolves credentials via the adapter (which refreshes the
+        underlying google-auth Credentials object when near expiry), swaps the
+        new token into the client kwargs, and rebuilds the primary OpenAI
+        client. Returns True when a usable token+base_url were obtained.
+        """
+        if self.api_mode != "chat_completions" or self.provider != "vertex":
+            return False
+
+        try:
+            from agent.vertex_adapter import get_vertex_config
+
+            token, base_url = get_vertex_config()
+        except Exception as exc:
+            logger.debug("Vertex credential refresh failed: %s", exc)
+            return False
+
+        if not isinstance(token, str) or not token.strip():
+            return False
+        if not isinstance(base_url, str) or not base_url.strip():
+            return False
+
+        self.api_key = token.strip()
+        self.base_url = base_url.strip().rstrip("/")
+        self._client_kwargs["api_key"] = self.api_key
+        self._client_kwargs["base_url"] = self.base_url
+
+        if not self._replace_primary_openai_client(reason="vertex_credential_refresh"):
+            return False
+
+        logger.info("Vertex AI OAuth token refreshed")
         return True
 
     def _try_refresh_copilot_client_credentials(self) -> bool:
@@ -4315,6 +4383,22 @@ class AIAgent:
         # applied across credential swaps and client rebuilds, not just at
         # first construction.
         self._apply_user_default_headers()
+
+        # Per-provider extra HTTP headers (providers.<name>.extra_headers /
+        # custom_providers[].extra_headers) — applied last so the most
+        # specific config level survives credential swaps and rebuilds too.
+        # SECURITY: values may carry credentials — never log them.
+        if self.api_mode not in ("anthropic_messages", "bedrock_converse"):
+            try:
+                from hermes_cli.config import (
+                    apply_custom_provider_extra_headers_to_client_kwargs,
+                )
+
+                apply_custom_provider_extra_headers_to_client_kwargs(
+                    self._client_kwargs, base_url,
+                )
+            except Exception:
+                logger.debug("custom-provider extra_headers skipped", exc_info=True)
 
     def _apply_user_default_headers(self) -> None:
         """Merge user-configured request headers onto the OpenAI client.
@@ -5093,7 +5177,7 @@ class AIAgent:
             "alibaba", "minimax", "minimax-cn",
             "opencode-go", "opencode-zen",
             "zai", "bedrock",
-            "xiaomi",
+            "xiaomi", "vertex",
         }:
             return True
         base = (getattr(self, "base_url", "") or "").lower()
@@ -5104,6 +5188,9 @@ class AIAgent:
             or "opencode.ai/zen/" in base
             or "bigmodel.cn" in base
             or "xiaomimimo.com" in base
+            # Vertex AI OpenAI-compat endpoint — Gemini model ids keep dots
+            # (e.g. google/gemini-3.5-flash); the hyphenated form is wrong.
+            or "aiplatform.googleapis.com" in base
             # AWS Bedrock runtime endpoints — defense-in-depth when
             # ``provider`` is unset but ``base_url`` still names Bedrock.
             or "bedrock-runtime." in base
@@ -5536,7 +5623,10 @@ class AIAgent:
         New DELEGATE_TASK_SCHEMA fields only need to be added here to reach all
         invocation paths (concurrent, sequential, inline).
         """
-        from tools.delegate_tool import delegate_task as _delegate_task
+        from tools.delegate_tool import (
+            _strip_model_hidden_task_fields,
+            delegate_task as _delegate_task,
+        )
         # Delegations from the top-level MODEL always run in the background —
         # the model does not get to choose. delegate_task returns immediately
         # with a handle (one per task) and each subagent's result re-enters the
@@ -5552,11 +5642,8 @@ class AIAgent:
         return _delegate_task(
             goal=function_args.get("goal"),
             context=function_args.get("context"),
-            toolsets=function_args.get("toolsets"),
-            tasks=function_args.get("tasks"),
+            tasks=_strip_model_hidden_task_fields(function_args.get("tasks")),
             max_iterations=function_args.get("max_iterations"),
-            acp_command=function_args.get("acp_command"),
-            acp_args=function_args.get("acp_args"),
             role=function_args.get("role"),
             background=(not _is_subagent),
             parent_agent=self,

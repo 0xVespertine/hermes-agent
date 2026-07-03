@@ -45,8 +45,37 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
+    "infinitycrew39@gmail.com": "infinitycrew39",  # PR #56431 salvage (honor live vLLM context limits on local endpoints)
+    "jonathan.kovacs999@gmail.com": "CocaKova",  # PR #57692 salvage (cron: run jobs under the profile secret scope so get_secret does not fail-close with UnscopedSecretError under profile isolation)
+    "hermes.wanderer@yahoo.com": "trismegistus-wanderer",  # PR #31856 salvage (gateway: defer idle-TTL agent-cache eviction until the session store says the session actually expired, so the expiry watcher can still fire MemoryProvider.on_session_end with the live transcript; #11205)
+    "louis@letsfive.io": "Mibayy",  # PR #3243 salvage (/compact alias + preview/aggressive flags for /compress)
+    "louis@letsfive.io": "Mibayy",  # PR #3176 salvage (api-server: per-client model routing via model_routes)
+    "jneeee@outlook.com": "jneeee",  # PR #3526 salvage (extra HTTP headers for LLM API calls via config.yaml)
+    "ai-lab@foxmail.com": "CrazyBoyM",  # PR #55828 salvage (image_gen openai-codex: wire image-to-image / reference-image editing via Codex Responses input_image parts; magic-byte + read-guard + 25MB-cap + clamp-to-16 hardening)
+    "r0gersm1th@users.noreply.github.com": "r0gersm1th",  # PR #3219 salvage (whatsapp bridge: resolve LID sender IDs to phone numbers in the message payload so phone-based allowlists match; commit authored by collaborator r0gersm1th, PR by @ajmeese7)
+    "louis@letsfive.io": "Mibayy",  # PR #3296 salvage (status: provider label honors config.yaml model.base_url, not just OPENAI_BASE_URL env)
+    "me@keslerm.com": "keslerm",  # PR #3459 salvage (gateway: 'log' tool_progress mode — silent in chat, tool calls appended to ~/.hermes/logs/tool_calls.log via rotating handler; duplicate of #3458 by @dlkakbs who submitted 4 min earlier — both credited)
+    "david.d.zhang@gmail.com": "Git-on-my-level",  # PR #3659 salvage (gateway: persist per-session /model overrides across gateway restarts)
+    "tarunravi@gmail.com": "tarunravi",  # PR #2696 salvage (api-server: inline MEDIA:<path> image tags as base64 data URLs in final responses so remote OpenAI-compatible frontends can render server-local screenshots; the PR's tool-progress-streaming and SSE-sentinel pieces were independently superseded on main)
+    "aqdrgg19@gmail.com": "VolodymyrBg",  # PR #2861 salvage (webhook: drop the unused full request payload from retained _delivery_info entries — up to ~1MB dead weight per delivery for the 1h idempotency TTL)
+    "ohyes9711@gmail.com": "CharmingGroot",  # PR #2794 salvage (email: guard msg_data[0][1] against malformed IMAP fetch structures so one bad response can't abort the batch and permanently lose seen-marked messages; Message-ID domain falls back to localhost when EMAIL_ADDRESS lacks '@')
+    "sahibzada@fastino.ai": "sahibzada-allahyar",  # PR #39227 salvage (desktop: configured terminal.cwd overrides a stale remembered workspace-cwd localStorage value when no session is active; #38855)
+    "jvsantos.cunha@gmail.com": "plcunha",  # PR #55300 salvage (gateway: record child gateway peer metadata after a compression session-id rotation and repoint stale sessions.json compression-parent entries to the recovered live child; consolidated in the compression-routing-integrity salvage)
+    "jakepresent1@gmail.com": "jakepresent",  # PR #55721 salvage (gateway: identity-guard stale in-flight compression splits — a late run may publish its compressed child only if its run generation is still current and the session key still points at the run's original parent, so an old run can't overwrite a newer /new or moved binding)
+    "gumclaw@gumroad.com": "gumclaw",  # PR #57322 salvage (gateway: close per-delivery webhook sessions on completion so prune_sessions can reap them — fixes unbounded state.db growth from unprunable ended_at=NULL webhook rows)
+    "zhangml@tech.icbc.com.cn": "zmlgit",  # PR #54872 salvage (multiplex-profile kanban: route task notifications via the owning profile's adapter + wake the creator agent with a synthetic internal MessageEvent on terminal events)
+    "1079826437@qq.com": "nankingjing",  # PR #56404 salvage (gateway: while a state.db compression lock is held for the session, demote busy_input_mode 'interrupt' to 'queue' so a rapid message burst can't interrupt and fork orphaned compression siblings off a stale parent; #56391)
+    "ud@arubangles.com": "udatny",  # PR #29433 salvage (subdirectory_hints: catch RuntimeError from Path.expanduser()/Path.home() so a literal ~ in tool-call args — e.g. LLM "~500-700" or ~unknownuser — can't escape the hint walker and crash the conversation loop)
+    "brett@personalfinancelab.com": "brett539",  # PR #49369 salvage (cap Telegram initialize() with asyncio.wait_for(HERMES_TELEGRAM_INIT_TIMEOUT, default 30s) per attempt so an unreachable fallback-IP connect chain can't block gateway startup indefinitely; add WARNING progress logs before DoH discovery and each connect attempt)
+    "randomuser2026x@proton.me": "randomuser2026x",  # PR #50204 salvage (gateway /restart under systemd: probe both system + --user scope for MainPID instead of hardcoding --user; always exit 75 so RestartForceExitStatus=75 revives the unit under Restart=on-failure too, not just Restart=always)
+    "mac-studio@Fabios-Mac-Studio.local": "valenteff",  # PR #53277 salvage (macOS launchd reload: retry bootstrap via _launchctl_bootstrap until launchctl-list confirms registration or the restart-drain window elapses; retry TimeoutExpired not just CalledProcessError; log persistent orphans)
+    "steve@lightpathapps.com": "slawt",  # PR #8427 salvage (Google Vertex AI provider for Gemini: OAuth2 token minting via service-account JSON / ADC on the OpenAI-compat endpoint, rewired as a provider profile with per-turn 401 token refresh)
+    "gary@bitcryptic.com": "bitcryptic-gw",  # PR #53997 salvage (Matrix E2EE: resolve device_id via query_keys({mxid: []}) when whoami returns none; guard verification call sites so query_keys is never sent [null]; reset _device_id_unverified at connect() start; disconnect before reconnect)
+    "gromyko.ss83@gmail.com": "Gromykoss",  # PR #56372 salvage (context_compressor merge-into-tail: place END MARKER last, wrap prior tail content in [PRIOR CONTEXT]...[END OF PRIOR CONTEXT] delimiters so the model doesn't read it as a fresh message)
+    "hodlclone@gmail.com": "HODLCLONE",  # PR #49351 salvage (Nous Portal token resilience: rotate refresh tokens write-through to the source auth store in profile mode, skip Nous fallback when no local token, sync gateway session model after fallback)
     "7698789+abchiaravalle@users.noreply.github.com": "abchiaravalle",  # PR #46997 salvage (recover resume_pending sessions: dual freshness signal + empty-turn safety net so restart auto-resume never sends a blank user turn)
     "swissly@users.noreply.github.com": "swissly",  # PR #47167 salvage (wrap cron delivery thread-pool fallback in its own try/except so a per-target failure can't escape the except-RuntimeError block and crash the multi-target delivery loop; #47163)
+    "53571168+shawchanshek@users.noreply.github.com": "shawchanshek",  # PR #44126 salvage (strip <think>...</think> reasoning blocks from title-generator LLM output via the canonical strip_think_blocks scrubber so reasoning-model output can't leak into session titles)
     "30854794+YLChen-007@users.noreply.github.com": "YLChen-007",  # PR #27289 salvage (case-insensitive streaming reasoning-tag filter in cli.py _stream_delta + gateway stream_consumer so mixed-case variants like <Think>/<ThInK> are suppressed, not just the hardcoded case literals)
     "27672904+kangsoo-bit@users.noreply.github.com": "kangsoo-bit",  # PR #47508 salvage (keep Telegram gateway alive on transient bootstrap network errors: best-effort deleteWebhook + resilient start_polling degrade to background recovery instead of failing startup)
     "259353979+testingbuddies24@users.noreply.github.com": "testingbuddies24",  # PR #43192 salvage (strip orphan think-tag close tags in progressive gateway stream so a bare </think> whose open was dropped upstream can't leak to the user)
@@ -60,6 +89,9 @@ AUTHOR_MAP = {
     "214165399+kernel-t1@users.noreply.github.com": "kernel-t1",  # PR #41349 salvage (.env sanitizer: only split when line starts with a known KEY= and preceding values are plain tokens; keep URL/query/whitespace secrets verbatim)
     "290858493+sasquatch9818@users.noreply.github.com": "sasquatch9818",  # PR #41198 salvage (defang untrusted-tool-result delimiter against tag injection; drop forgeable startswith fast-path)
     "jnibarger01@gmail.com": "jnibarger01",  # PR #35130 salvage (ReDoS-bound threat-pattern filler + FTS5 query cap + V4A Move-File approval/traversal targets)
+    "yong2bba@gmail.com": "yong2bba",  # PR #49830 salvage (harden browser tool safety boundaries: config-gated risky-eval blocklist, force-redact browser/CDP/supervisor output, session-ownership tracking, credential-query denylist)
+    "info@djimit.nl": "djimit",  # PR #48034 salvage (recover from truncated gateway responses: 4 continuation retries + exponential token headroom + normalize empty partials)
+    "lubos@komfi.health": "lubosxyz",  # PR #49225 salvage (persist codex app-server turns to session DB via agent_persisted=False so session_search/distill see gateway conversations)
     "290868363+petrichor-op@users.noreply.github.com": "petrichor-op",  # PR #41281 salvage (never persist ephemeral empty-response recovery scaffolding to the SQLite session store / JSON log; filter by flag not position)
     "283494121+redactdeveloper@users.noreply.github.com": "redactdeveloper",  # PR #36897 salvage (route /sessions & /history through prompt_toolkit-safe print; filter doctor missing-key summary to CLI-enabled toolsets)
     "charleneleong84@gmail.com": "charleneleong-ai",  # PR #11736 salvage (classify Anthropic "out of extra usage" 400 as billing)
@@ -147,6 +179,7 @@ AUTHOR_MAP = {
     "rayjun0412@gmail.com": "rayjun",  # cron model.default salvage co-author (#43952)
     "96944678+sweetcornna@users.noreply.github.com": "sweetcornna",  # cron ticker-liveness salvage co-author (#33849)
     "izumi0uu@gmail.com": "izumi0uu",  # PR #49544 salvage (native rich reply echo; #49534)
+    "zhangyingliang@outlook.com": "yingliang-zhang",  # PR #56084 (setup RPC pool routing; #57335)
     "dev@pixlmedia.no": "texhy",  # PR #27435 salvage (few-but-huge preflight compression gate; #27405)
     "qdaszx@naver.com": "qdaszx",  # PR #29190 salvage (non-blocking OSV malware preflight; #29184)
     "w31rdm4ch1n3z@protonmail.com": "w31rdm4ch1nZ",
@@ -227,6 +260,8 @@ AUTHOR_MAP = {
     "290859878+synapsesx@users.noreply.github.com": "synapsesx",
     "157689911+itsflownium@users.noreply.github.com": "itsflownium",
     "dirtyren@users.noreply.github.com": "dirtyren",
+    "153708448+hunjaiboy@users.noreply.github.com": "yyzquwu",  # PR #47567 salvage (Matrix: register inbound handlers with wait_sync=True so _dispatch_sync's gather awaits them; without it mautrix fire-and-forgets and inbound intake has no completion point)
+    "jearnest@velocityenergy.com": "jearnest11",  # PR #48700 salvage (multi-profile gateway flap: use node symlink's own parent, not .resolve() target, when building systemd/launchd service PATH so one profile's node path can't leak into every unit and force a perpetual daemon-reload restart loop)
     "tgmerritt@gmail.com": "tgmerritt",  # PR #43553 salvage (parse vLLM's token-based output-cap error format so over-cap max_tokens 400s reduce the output cap instead of death-looping into compression)
     "13277570+justin-cyhuang@users.noreply.github.com": "justin-cyhuang",
     "agent@tranquil-flow.dev": "Tranquil-Flow",
@@ -898,6 +933,7 @@ AUTHOR_MAP = {
     "fr@tecompanytea.com": "ifrederico",
     "cdanis@gmail.com": "cdanis",
     "samherring99@gmail.com": "samherring99",
+    "sampiyonyus@gmail.com": "crazywriter1",
     "desaiaum08@gmail.com": "Aum08Desai",
     "shannon.sands.1979@gmail.com": "shannonsands",
     "shannon@nousresearch.com": "shannonsands",
@@ -1099,6 +1135,7 @@ AUTHOR_MAP = {
     "hata1234@gmail.com": "hata1234",
     "hmbown@gmail.com": "Hmbown",
     "iacobs@m0n5t3r.info": "m0n5t3r",
+    "iacobs@webflakes.com": "m0n5t3r",
     "jiayuw794@gmail.com": "JiayuuWang",
     "jinhyuk9714@gmail.com": "sjh9714",
     "jonny@nousresearch.com": "yoniebans",
@@ -1353,6 +1390,7 @@ AUTHOR_MAP = {
     "holynn@placeholder.local": "holynn-q",
     "agent@hermes.local": "jacdevos",
     "sunsky.lau@gmail.com": "liuhao1024",
+    "suninrain086@gmail.com": "suninrain086",  # PR #57651 salvage of #50685 (vision custom-endpoint creds)
     "mohamed.origami@gmail.com": "mohamedorigami-jpg",  # PR #32117 (cron storage root anchor; #32091)
     "58446328+sherman-yang@users.noreply.github.com": "sherman-yang",  # PR #32788 (cron per-job MCP merge; #23997)
     "rob@rbrtbn.com": "rbrtbn",
@@ -1804,6 +1842,21 @@ AUTHOR_MAP = {
     "afnlegion01@gmail.com": "Afnath-max",  # PR #49129 salvage (opencode-zen catalog refresh + uncapped/live-first picker)
     "sharma.priyanshu96@gmail.com": "ipriyaaanshu",  # PR #51488 salvage (clear stale base_url on gateway model switches; #25107)
     "290881485+mrparker0980@users.noreply.github.com": "mrparker0980",  # @file context-ref expansion anchored to canonical read deny-list
+    # v0.18.0 additions
+    "3483421977@qq.com": "AetherAgents",  # direct email match
+    "SJWATTS89@OUTLOOK.COM": "lEWFkRAD",  # PR #45610 (Windows scheduled task reboot survival)
+    "andhika.prakasiwi@gmail.com": "p-andhika",  # PR #53312 co-author (setup guide button)
+    "annguyen@nousresearch.com": "annguyenNous",  # PR #52844 co-author
+    "carlitosdiazplaza@gmail.com": "talmax1124",  # direct email match
+    "christianpersico98@gmail.com": "chrispersico",  # commit 135f2351 PR author
+    "daniel.laforce@argobox.com": "KeyArgo",  # co-author
+    "joeykerp@gmail.com": "spjoes",  # direct email match
+    "keyargo@argobox.com": "KeyArgo",  # PR #45638 author
+    "lucas.nicolas@proton.me": "Lucas Nicolas",  # PR #54210 co-author (display name)
+    "max.petrusenko.agent@gmail.com": "maxpetrusenko",  # PR #54128 co-author
+    "poli.koltsova@gmail.com": "wnuuee1",  # commit 9fd2b2cb PR author
+    "yosapol@jitrak.dev": "Eji4h",  # direct email match
+    "kiljadn@gmail.com": "designnotdrum",  # PR #56480 salvage (toolset static-inference fix)
 }
 
 
