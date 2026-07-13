@@ -7,6 +7,10 @@ approval:
   choose_short:    "      [o]una volta  |  [s]essione  |  [d]nega"
   prompt_long:     "      Scelta [o/s/a/D]: "
   prompt_short:    "      Scelta [o/s/D]: "
+  choose_smart_deny: "      [o]una volta  |  [d]nega"
+  prompt_smart_deny: "      Scelta [o/D]: "
+  smart_deny_once_inputs: "o,once"
+  smart_deny_deny_inputs: "d,deny"
   timeout:         "      ⏱ Tempo scaduto — comando negato"
   allowed_once:    "      ✓ Consentito una volta"
   allowed_session: "      ✓ Consentito per questa sessione"
@@ -107,6 +111,8 @@ gateway:
     no_pending:            "Nessun comando in attesa da negare."
     denied_singular:       "❌ Comando negato."
     denied_plural:         "❌ Comandi negati ({count} comandi)."
+    denied_reason_singular: "❌ Comando negato. Motivo inoltrato all'agente: \"{reason}\""
+    denied_reason_plural:  "❌ Comandi negati ({count} comandi). Motivo inoltrato all'agente: \"{reason}\""
 
   fast:
     not_supported:         "⚡ /fast è disponibile solo per i modelli OpenAI che supportano Priority Processing."
