@@ -1,3 +1,4 @@
+import type { HermesSkin } from '@hermes/shared/skin'
 import type { QueryClient } from '@tanstack/react-query'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
@@ -32,9 +33,7 @@ import {
   setCurrentBranch,
   setCurrentCwd,
   setCurrentFastMode,
-  setCurrentModel,
   setCurrentPersonality,
-  setCurrentProvider,
   setCurrentReasoningEffort,
   setCurrentServiceTier,
   setCurrentUsage,
@@ -47,6 +46,9 @@ import { clearActiveSessionTodos } from '@/store/todos'
 import { recordToolDiff } from '@/store/tool-diffs'
 import { reportInstallMethodWarning } from '@/store/updates'
 import { notifyWorkspaceChanged, toolChangedPath, toolMayMutateFiles } from '@/store/workspace-events'
+// Leaf import (not the `@/themes` barrel) to avoid pulling the ThemeProvider
+// module graph into the gateway event hot path.
+import { ingestBackendSkin } from '@/themes/backend-sync'
 import type { RpcEvent } from '@/types/hermes'
 
 import type { ClientSessionState } from '../../../types'
@@ -55,6 +57,7 @@ import { hasSessionInfoStatePatch, sessionInfoStatePatch, SUBAGENT_EVENT_TYPES, 
 
 const COMPACTION_RESUME_EVENT_TYPES = new Set([
   'message.delta',
+  'message.interim',
   'thinking.delta',
   'reasoning.delta',
   'reasoning.available',
@@ -73,9 +76,10 @@ interface GatewayEventDeps {
   nativeSubagentSessionsRef: MutableRefObject<Set<string>>
   appendAssistantDelta: (sessionId: string, delta: string) => void
   appendReasoningDelta: (sessionId: string, delta: string, replace?: boolean) => void
-  completeAssistantMessage: (sessionId: string, text: string) => void
+  completeAssistantMessage: (sessionId: string, text: string, responsePreviewed?: boolean) => void
   failAssistantMessage: (sessionId: string, errorMessage: string) => void
   flushQueuedDeltas: (sessionId?: string) => void
+  finalizeInterimAssistantMessage: (sessionId: string, text: string) => void
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
   sessionInterrupted: (sessionId: string) => boolean
@@ -105,6 +109,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
     completeAssistantMessage,
     failAssistantMessage,
     flushQueuedDeltas,
+    finalizeInterimAssistantMessage,
     queryClient,
     refreshHermesConfig,
     sessionInterrupted,
@@ -180,6 +185,21 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       }
 
       if (event.type === 'gateway.ready') {
+        // Seed the active skin into the desktop theme registry without applying,
+        // so a fresh connect never overrides the user's persisted desktop theme.
+        ingestBackendSkin((payload as { skin?: HermesSkin } | undefined)?.skin, { apply: false })
+
+        return
+      } else if (event.type === 'skin.changed') {
+        // A runtime skin switch (Hermes activating an authored skin, or `/skin`
+        // on another surface). Only the active profile's change repaints.
+        const fromActiveProfile =
+          !event.profile || normalizeProfileKey(event.profile) === normalizeProfileKey($activeGatewayProfile.get())
+
+        if (fromActiveProfile) {
+          ingestBackendSkin(payload as HermesSkin | undefined, { apply: true })
+        }
+
         return
       } else if (event.type === 'session.info') {
         // Apply session-scoped fields when the event targets the active
@@ -219,13 +239,12 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
 
         if (apply) {
-          if (modelChanged) {
-            setCurrentModel(payload!.model || '')
-          }
-
-          if (providerChanged) {
-            setCurrentProvider(payload!.provider || '')
-          }
+          // Do not call setCurrentModel / setCurrentProvider here. Composer
+          // model/provider is sticky UI state (localStorage + manual picks).
+          // Periodic session.info heartbeats often carry the profile default
+          // (or a stale session model) and would silently revert the dropdown.
+          // Active-session model/provider still flows through the session state
+          // cache via updateSessionState → syncRuntimeMetadataToView below.
 
           if (typeof payload?.cwd === 'string') {
             // The active session's agent can relocate itself (new repo/worktree
@@ -284,7 +303,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
 
         // The running→busy transition must reach EVERY session, not just the
         // active one. The `apply` gate above correctly scopes view-only side
-        // effects (setCurrentModel, setCurrentCwd, etc.) to the focused chat,
+        // effects (setCurrentCwd, etc.) to the focused chat,
         // but the per-session busy state is what drives the sidebar working
         // indicator — a background session's turn start/finish must update
         // its dot without the user opening it. updateSessionState only
@@ -389,6 +408,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
             awaitingResponse: true,
             sawAssistantPayload: false,
             interrupted: false,
+            interimBoundaryPending: false,
             turnStartedAt: Date.now()
           }
         })
@@ -399,6 +419,19 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       } else if (event.type === 'message.delta') {
         if (sessionId) {
           appendAssistantDelta(sessionId, coerceGatewayText(payload?.text))
+        }
+      } else if (event.type === 'message.interim') {
+        // The agent emitted interim assistant commentary (text alongside tool
+        // calls, or the attempted final answer before a verify-on-stop nudge).
+        // Finalize it as its own sealed bubble so message.complete doesn't wipe
+        // it — the text was already streamed via message.delta and is visible.
+        if (sessionId) {
+          flushQueuedDeltas(sessionId)
+          const text = coerceGatewayText(payload?.text)
+
+          if (text) {
+            finalizeInterimAssistantMessage(sessionId, text)
+          }
         }
       } else if (event.type === 'thinking.delta') {
         // thinking.delta carries the kawaii spinner status (face + verb from
@@ -469,10 +502,11 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
 
         flushQueuedDeltas(sessionId)
 
-        playCompletionSound()
+        // Keyed by session so only one window beeps when several are open.
+        playCompletionSound(sessionId)
 
         const finalText = coerceGatewayText(payload?.text) || coerceGatewayText(payload?.rendered)
-        completeAssistantMessage(sessionId, finalText)
+        completeAssistantMessage(sessionId, finalText, payload?.response_previewed)
 
         if (isActiveEvent) {
           setTurnStartedAt(null)
@@ -806,6 +840,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       compactedTurnRef,
       completeAssistantMessage,
       failAssistantMessage,
+      finalizeInterimAssistantMessage,
       flushQueuedDeltas,
       lastCwdInfoSessionRef,
       nativeSubagentSessionsRef,
