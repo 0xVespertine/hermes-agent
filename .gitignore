@@ -137,10 +137,6 @@ docs/superpowers/*
 # logs, and per-session caches are never artifacts of the codebase.
 .hermes/
 
-# Installation method marker written into the managed checkout root.
-# This is Hermes-managed runtime state, not a source change.
-/.install_method
-
 # Desktop/bootstrap install marker written into the managed checkout root by the
 # bootstrap installer. It is Hermes-managed runtime state, never a code change —
 # ignore it so `hermes update`'s `git stash push --include-untracked` does not
