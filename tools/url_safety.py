@@ -19,6 +19,11 @@ Limitations:
     ``create_ssrf_safe_client()`` / ``create_ssrf_safe_async_client()`` so the
     same policy is applied immediately before TCP connect and the client
     connects to the validated IP while preserving Host/SNI semantics.
+  - NAT64/DNS64 addresses are unwrapped only for the RFC 6052 well-known
+    prefix (64:ff9b::/96).  A network using a custom NAT64 prefix still has
+    its synthesized AAAA answers judged as IPv6, which blocks them; those
+    deployments need ``security.allow_private_urls`` (the metadata floor
+    stays enforced) until the prefix is made configurable.
   - Redirect-based bypass is mitigated by httpx event hooks that re-validate
     each redirect target in vision_tools, gateway platform adapters, and
     media cache helpers. Web tools use third-party SDKs (Firecrawl/Tavily)
@@ -193,6 +198,41 @@ _MAX_SSRF_CONNECT_IPS = 8
 # VPNs, and some cloud internal networks.
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 
+# RFC 6052 well-known NAT64 prefix.  DNS64 resolvers — standard in IPv6-only
+# containers (LXC/Docker without IPv4 egress) — answer A-only hostnames with a
+# synthesized AAAA in this prefix, carrying the real IPv4 in the low 32 bits:
+# ``www.example.com -> 64:ff9b::d4d9:2e0a`` is 212.217.46.10, a public address.
+# ``ipv4_mapped`` is None for these, and Python's ipaddress reports the whole
+# prefix as ``is_reserved``, so without unwrapping every DNS64-resolved host
+# looks internal and all outbound web access is blocked.
+#
+# Only the /96 well-known prefix is unwrapped: RFC 6052 fixes the embedded
+# address at the low 32 bits for that length, so the extraction is unambiguous.
+# Network-specific prefixes (RFC 6052 /32../64, RFC 8215 64:ff9b:1::/48) carry
+# the IPv4 at a prefix-dependent offset and are deliberately left blocked
+# rather than guessed at.
+_NAT64_WELL_KNOWN_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _embedded_ipv4(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> Optional[ipaddress.IPv4Address]:
+    """Return the IPv4 address wrapped inside an IPv6 address, if any.
+
+    Covers both wrappers a resolver can hand back for an IPv4-only host:
+    IPv4-mapped (``::ffff:x.x.x.x``) and well-known-prefix NAT64/DNS64
+    (``64:ff9b::x.x.x.x``).  Returns None for genuine IPv6 addresses, which
+    must be judged on their own classification.
+    """
+    if not isinstance(ip, ipaddress.IPv6Address):
+        return None
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip in _NAT64_WELL_KNOWN_PREFIX:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Global toggle: allow private/internal IP resolution
 # ---------------------------------------------------------------------------
@@ -261,14 +301,15 @@ def _reset_allow_private_cache() -> None:
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if the IP should be blocked for SSRF protection."""
-    # IPv4-mapped IPv6 addresses (``::ffff:x.x.x.x``) should be checked
-    # by their embedded IPv4 address, not as IPv6
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        embedded_ip = ip.ipv4_mapped
-        return (embedded_ip.is_private or embedded_ip.is_loopback or
-                embedded_ip.is_link_local or embedded_ip.is_reserved or
-                embedded_ip.is_multicast or embedded_ip.is_unspecified or
-                embedded_ip in _CGNAT_NETWORK)
+    # IPv6 wrappers around an IPv4 address (``::ffff:x.x.x.x``,
+    # ``64:ff9b::x.x.x.x``) are judged by the embedded IPv4 address, not as
+    # IPv6 — the wrapper's own classification says nothing about the real
+    # target, and for NAT64 it is misleading (the whole prefix is reserved).
+    # Recursing keeps every IPv4 rule applied, so ``64:ff9b::7f00:1``
+    # (loopback) and ``64:ff9b::a9fe:a9fe`` (metadata) stay blocked.
+    embedded_ip = _embedded_ipv4(ip)
+    if embedded_ip is not None:
+        return _is_blocked_ip(embedded_ip)
 
     # Standard IPv4/IPv6 address checking
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
@@ -278,6 +319,25 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     # CGNAT range not covered by is_private
     if ip in _CGNAT_NETWORK:
         return True
+    return False
+
+
+def _is_always_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True when *ip* hits the non-negotiable metadata/link-local floor.
+
+    Checks the address itself and, when it wraps an IPv4 address, the embedded
+    IPv4 too.  The floor is enforced even with ``allow_private_urls`` on, so it
+    must not depend on the incidental ``is_reserved`` block that
+    :func:`_is_blocked_ip` applies — otherwise ``64:ff9b::a9fe:a9fe`` would
+    reach 169.254.169.254 on any host that enables the toggle.
+    """
+    for candidate in (ip, _embedded_ipv4(ip)):
+        if candidate is None:
+            continue
+        if candidate in _ALWAYS_BLOCKED_IPS or any(
+            candidate in net for net in _ALWAYS_BLOCKED_NETWORKS
+        ):
+            return True
     return False
 
 
@@ -331,9 +391,7 @@ def is_always_blocked_url(url: str) -> bool:
             ip = None
 
         if ip is not None:
-            if ip in _ALWAYS_BLOCKED_IPS or any(
-                ip in net for net in _ALWAYS_BLOCKED_NETWORKS
-            ):
+            if _is_always_blocked_ip(ip):
                 logger.warning(
                     "Blocked request to cloud metadata address "
                     "(always-blocked floor): %s",
@@ -360,9 +418,7 @@ def is_always_blocked_url(url: str) -> bool:
             except ValueError:
                 logger.warning("Unparseable IP address %r for hostname %s — skipping address", sockaddr[0], hostname)
                 continue
-            if resolved in _ALWAYS_BLOCKED_IPS or any(
-                resolved in net for net in _ALWAYS_BLOCKED_NETWORKS
-            ):
+            if _is_always_blocked_ip(resolved):
                 logger.warning(
                     "Blocked request to cloud metadata address "
                     "(always-blocked floor): %s -> %s",
@@ -437,7 +493,7 @@ def is_safe_url(url: str) -> bool:
                 return False
 
             # Always block cloud metadata IPs and link-local, even with toggle on
-            if ip in _ALWAYS_BLOCKED_IPS or any(ip in net for net in _ALWAYS_BLOCKED_NETWORKS):
+            if _is_always_blocked_ip(ip):
                 logger.warning(
                     "Blocked request to cloud metadata address: %s -> %s",
                     hostname, ip_str,
@@ -528,7 +584,7 @@ def _resolved_http_connect_ips(host: str, port: int, scheme: str) -> list[str]:
                 f"Blocked request - unparseable IP address {sockaddr[0]!r} for hostname {hostname}"
             ) from exc
 
-        if ip in _ALWAYS_BLOCKED_IPS or any(ip in net for net in _ALWAYS_BLOCKED_NETWORKS):
+        if _is_always_blocked_ip(ip):
             raise SSRFConnectionBlocked(
                 f"Blocked request to cloud metadata address during connect: {hostname} -> {ip_str}"
             )

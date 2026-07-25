@@ -788,6 +788,136 @@ class TestIPv4MappedIPv6SSRF:
             assert is_safe_url("http://aliyun-metadata.internal/") is False
 
 
+class TestNAT64DNS64:
+    """Regression tests for NAT64/DNS64 synthesized AAAA answers.
+
+    IPv6-only containers resolve through DNS64, which answers A-only hostnames
+    with a synthesized AAAA in the RFC 6052 well-known prefix
+    (``www.example.com -> 64:ff9b::d4d9:2e0a`` = public 212.217.46.10).
+    ``ipv4_mapped`` is None for these and Python's ipaddress reports the whole
+    prefix as ``is_reserved``, so before the unwrap every DNS64-resolved public
+    host was blocked and the agent had no outbound web access at all.
+    """
+
+    # ── _is_blocked_ip direct tests: false positives that must be allowed ──
+
+    @pytest.mark.parametrize("ip_str,ipv4", [
+        ("64:ff9b::d4d9:2e0a", "212.217.46.10"),   # www.mahakim.ma
+        ("64:ff9b::808:808", "8.8.8.8"),           # Public DNS
+        ("64:ff9b::5db8:d822", "93.184.216.34"),   # example.com
+        ("64:ff9b::6400:1", "100.0.0.1"),          # Just below CGNAT
+    ])
+    def test_nat64_public_ipv4_allowed(self, ip_str, ipv4):
+        """NAT64-wrapped public IPv4 must NOT be blocked as reserved IPv6."""
+        ip = ipaddress.ip_address(ip_str)
+        assert int(ip) & 0xFFFFFFFF == int(ipaddress.IPv4Address(ipv4))
+        assert _is_blocked_ip(ip) is False, f"{ip_str} ({ipv4}) should be allowed"
+
+    # ── _is_blocked_ip direct tests: the unwrap must not open a bypass ──
+
+    @pytest.mark.parametrize("ip_str,ipv4", [
+        ("64:ff9b::7f00:1", "127.0.0.1"),           # Loopback
+        ("64:ff9b::c0a8:1", "192.168.0.1"),         # Private
+        ("64:ff9b::a00:1", "10.0.0.1"),             # Private
+        ("64:ff9b::a9fe:a9fe", "169.254.169.254"),  # Cloud metadata
+        ("64:ff9b::a9fe:2a63", "169.254.42.99"),    # Link-local (non-metadata)
+        ("64:ff9b::6440:1", "100.64.0.1"),          # CGNAT
+        ("64:ff9b::6464:64c8", "100.100.100.200"),  # Alibaba metadata
+        ("64:ff9b::", "0.0.0.0"),                   # Unspecified
+        ("64:ff9b::e000:1", "224.0.0.1"),           # Multicast
+    ])
+    def test_nat64_internal_ipv4_still_blocked(self, ip_str, ipv4):
+        """Unwrapping must apply every IPv4 rule, not skip them."""
+        ip = ipaddress.ip_address(ip_str)
+        assert int(ip) & 0xFFFFFFFF == int(ipaddress.IPv4Address(ipv4))
+        assert _is_blocked_ip(ip) is True, f"{ip_str} ({ipv4}) should be blocked"
+
+    def test_non_well_known_nat64_prefix_stays_blocked(self):
+        """Only 64:ff9b::/96 is unwrapped — the embedded offset is unambiguous
+        only there. RFC 8215's 64:ff9b:1::/48 is judged as IPv6 (blocked)
+        rather than guessed at."""
+        assert _is_blocked_ip(ipaddress.ip_address("64:ff9b:1::d4d9:2e0a")) is True
+
+    def test_genuine_public_ipv6_unaffected(self):
+        """A real IPv6 address is still judged on its own classification."""
+        assert _is_blocked_ip(ipaddress.ip_address("2606:4700:4700::1111")) is False
+
+    # ── is_safe_url integration: the reported failure ──
+
+    def test_dns64_resolved_public_host_allowed(self):
+        """The reported bug: DNS64-only container could not fetch a public site."""
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("64:ff9b::d4d9:2e0a", 0, 0, 0)),
+        ]):
+            assert is_safe_url("https://www.mahakim.ma/") is True
+
+    def test_dns64_resolved_loopback_blocked(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("64:ff9b::7f00:1", 0, 0, 0)),
+        ]):
+            assert is_safe_url("http://sneaky.example.com/") is False
+
+    def test_dns64_scope_id_stripped_then_unwrapped(self):
+        """Scope-ID suffixes must not defeat the unwrap."""
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("64:ff9b::d4d9:2e0a%eth0", 0, 0, 0)),
+        ]):
+            assert is_safe_url("https://www.mahakim.ma/") is True
+
+    # ── always-blocked floor: must hold with allow_private_urls ON ──
+
+    @pytest.mark.parametrize("ip_str", [
+        "64:ff9b::a9fe:a9fe",    # 169.254.169.254 — AWS/GCP/Azure metadata
+        "64:ff9b::a9fe:aa02",    # 169.254.170.2 — AWS ECS task metadata
+        "64:ff9b::a9fe:a9fd",    # 169.254.169.253 — Azure IMDS wire server
+        "64:ff9b::6464:64c8",    # 100.100.100.200 — Alibaba metadata
+        "64:ff9b::a9fe:2a63",    # 169.254.42.99 — link-local floor
+    ])
+    def test_nat64_metadata_blocked_even_with_toggle_on(self, ip_str, monkeypatch):
+        """The metadata floor is enforced regardless of allow_private_urls.
+
+        Without unwrapping in the floor check, these were blocked only
+        incidentally by ``is_reserved`` inside _is_blocked_ip — which the toggle
+        skips.  Since DNS64 containers are exactly where the toggle gets
+        enabled, that would have been a live SSRF bypass to cloud credentials.
+        """
+        _reset_allow_private_cache()
+        monkeypatch.setenv("HERMES_ALLOW_PRIVATE_URLS", "true")
+        try:
+            with patch("socket.getaddrinfo", return_value=[
+                (10, 1, 6, "", (ip_str, 0, 0, 0)),
+            ]):
+                assert is_safe_url("http://metadata.example.com/") is False
+                assert is_always_blocked_url("http://metadata.example.com/") is True
+                with pytest.raises(SSRFConnectionBlocked):
+                    _resolved_http_connect_ips("metadata.example.com", 80, "http")
+        finally:
+            _reset_allow_private_cache()
+
+    def test_nat64_metadata_literal_in_floor(self):
+        """Literal NAT64 metadata URL hits the floor without any DNS."""
+        assert is_always_blocked_url("http://[64:ff9b::a9fe:a9fe]/") is True
+
+    # ── connect-time guard dials the synthesized IPv6, not the raw IPv4 ──
+
+    def test_connect_returns_nat64_address_unchanged(self):
+        """The container's only route to the host is via the NAT64 address, so
+        the vetted IP handed to the transport must stay the IPv6 form."""
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("64:ff9b::d4d9:2e0a", 443, 0, 0)),
+        ]):
+            assert _resolved_http_connect_ips("www.mahakim.ma", 443, "https") == [
+                "64:ff9b::d4d9:2e0a"
+            ]
+
+    def test_connect_blocks_nat64_wrapped_private(self):
+        with patch("socket.getaddrinfo", return_value=[
+            (10, 1, 6, "", ("64:ff9b::c0a8:1", 443, 0, 0)),
+        ]):
+            with pytest.raises(SSRFConnectionBlocked):
+                _resolved_http_connect_ips("sneaky.example.com", 443, "https")
+
+
 class _FakeResponse:
     """Minimal stand-in for an httpx response as seen inside a response hook."""
 
