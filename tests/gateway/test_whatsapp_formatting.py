@@ -365,7 +365,13 @@ class TestSendChunking:
         )
 
     @pytest.mark.asyncio
-    async def test_protected_media_example_is_not_visible_or_uploaded(self):
+    async def test_protected_media_example_is_not_uploaded(self):
+        """A MEDIA: tag inside a code fence is an example, not a delivery.
+
+        Upstream keeps such tags in the display text on purpose so what the
+        user reads matches what was delivered (#16434); the guarantee we
+        depend on is that the file is never uploaded.
+        """
         adapter = _make_adapter()
         resp = MagicMock(status=200)
         resp.json = AsyncMock(return_value={"messageId": "text1"})
@@ -379,8 +385,6 @@ class TestSendChunking:
 
         assert result.success
         payload = adapter._http_session.post.call_args.kwargs["json"]
-        assert "MEDIA:" not in payload["message"]
-        assert "/home/plume" not in payload["message"]
         assert "Done." in payload["message"]
         adapter.send_document.assert_not_awaited()
 
