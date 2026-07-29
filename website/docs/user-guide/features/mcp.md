@@ -213,6 +213,19 @@ Use HTTP servers when:
 
 Most hosted MCP servers (Linear, Sentry, Atlassian, Asana, Figma, Stripe, …) require OAuth 2.1 instead of a static bearer token. Set `auth: oauth` and Hermes handles discovery, dynamic client registration, PKCE, token exchange, refresh, and step-up auth via the MCP Python SDK.
 
+:::tip Figma remote MCP
+Figma's hosted endpoint (`https://mcp.figma.com/mcp`) allowlists Dynamic Client Registration by **exact `client_name`** — bare `"Hermes Agent"` 403s, while `"Claude Code"` and `"Codex"` succeed. Hermes auto-sets `oauth.client_name: "Claude Code"` for `mcp.figma.com` so install/login works without a special trick:
+
+```yaml
+mcp_servers:
+  figma:
+    url: "https://mcp.figma.com/mcp"
+    auth: oauth
+```
+
+Or: `hermes mcp install figma`, then `hermes mcp login figma`.
+:::
+
 ```yaml
 mcp_servers:
   linear:
@@ -728,6 +741,23 @@ mcp_servers:
     sampling:
       enabled: false
 ```
+
+## MCP Elicitation Support
+
+MCP servers can ask the user for structured input mid-tool-call via the `elicitation/create` protocol (mcp Python SDK ≥ 1.11.0). Hermes routes **form-mode** elicitations through its existing approval surface — an interactive prompt in the CLI/TUI, or approval buttons on gateway platforms like Telegram and Slack — so the request reaches you wherever the session lives. **URL-mode** elicitations (where a server points you at an external URL) are declined as unsupported.
+
+Elicitation is **enabled by default** per server. Configure it under the `elicitation` key:
+
+```yaml
+mcp_servers:
+  my_server:
+    command: "my-mcp-server"
+    elicitation:
+      enabled: true    # default: true
+      timeout: 300     # seconds to wait for your answer (default: 300)
+```
+
+The 5-minute default timeout mirrors the gateway approval default so users on async surfaces have time to respond before the server gives up. Per-server metrics (requests, accepted, declined, errors) are tracked on the handler.
 
 ## Running Hermes as an MCP server
 
