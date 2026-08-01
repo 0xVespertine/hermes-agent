@@ -27,6 +27,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
 from typing import Dict, Optional, Any
 
+from agent.secret_scope import get_secret
 from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
 from hermes_constants import (
     find_node_executable,
@@ -359,6 +360,18 @@ def check_whatsapp_requirements() -> bool:
         return False
 
 
+def _resolve_allow_list_source(
+    config_extra: Dict[str, Any],
+    *config_keys: str,
+    env_var: str,
+) -> Any:
+    """Resolve an allowlist without overriding an explicit empty config value."""
+    for key in config_keys:
+        if key in config_extra:
+            return config_extra[key]
+    return get_secret(env_var)
+
+
 class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
     """
     WhatsApp adapter.
@@ -410,9 +423,23 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         ))
         self._reply_prefix: Optional[str] = config.extra.get("reply_prefix")
         self._dm_policy = str(config.extra.get("dm_policy") or os.getenv("WHATSAPP_DM_POLICY", "pairing")).strip().lower()
-        self._allow_from = self._coerce_allow_list(config.extra.get("allow_from") or config.extra.get("allowFrom"))
+        self._allow_from = self._coerce_allow_list(
+            _resolve_allow_list_source(
+                config.extra,
+                "allow_from",
+                "allowFrom",
+                env_var="WHATSAPP_ALLOWED_USERS",
+            )
+        )
         self._group_policy = str(config.extra.get("group_policy") or os.getenv("WHATSAPP_GROUP_POLICY", "pairing")).strip().lower()
-        self._group_allow_from = self._coerce_allow_list(config.extra.get("group_allow_from") or config.extra.get("groupAllowFrom"))
+        self._group_allow_from = self._coerce_allow_list(
+            _resolve_allow_list_source(
+                config.extra,
+                "group_allow_from",
+                "groupAllowFrom",
+                env_var="WHATSAPP_GROUP_ALLOWED_USERS",
+            )
+        )
         read_receipts = config.extra.get("send_read_receipts", False)
         self._send_read_receipts = (
             read_receipts if isinstance(read_receipts, bool)
