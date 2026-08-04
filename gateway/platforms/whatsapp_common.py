@@ -38,7 +38,9 @@ import re
 from typing import Any, Dict, Optional
 
 from agent.secret_scope import UnscopedSecretError as _UnscopedSecretError
+from agent.secret_scope import current_secret_scope as _current_secret_scope
 from agent.secret_scope import get_secret as _scoped_get_secret
+from agent.secret_scope import is_multiplex_active as _is_multiplex_active
 
 
 def _get_wsecret(name, default=None):
@@ -57,6 +59,22 @@ def _get_wsecret(name, default=None):
     except _UnscopedSecretError:
         val = os.getenv(name)
     return val if val is not None else default
+
+def _env_carrier_is_scoped(name: Optional[str]) -> bool:
+    """True when ``name`` resolves from an installed profile secret scope.
+
+    Fork helper. Adapters record this at construction so ``_live_dm_allow_from``
+    knows whether the allowlist came from a per-profile ``.env`` overlay (never
+    re-readable from ``os.environ``) or from the process environment (the
+    default profile's own carrier, which pairing mutates in place).
+    """
+    if not isinstance(name, str) or name == "config":
+        return False
+    if not _is_multiplex_active():
+        return False
+    scope = _current_secret_scope()
+    return scope is not None and scope.get(name) is not None
+
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +187,19 @@ class WhatsAppBehaviorMixin:
         """
         source = getattr(self, "_dm_allowlist_source", None)
         if isinstance(source, str) and source != "config":
+            if getattr(self, "_dm_allowlist_scoped", False):
+                # Fork: this adapter was seeded from an installed profile secret
+                # scope, so os.environ is NOT its carrier — under multiplexing it
+                # holds the process-global (often another profile's) list. Re-read
+                # the scope when one is installed so pairing approve/revoke still
+                # applies without restart; otherwise keep the scoped snapshot.
+                scope = _current_secret_scope()
+                if scope is None:
+                    return set(self._allow_from or ())
+                raw = scope.get(source)
+                if raw is None:
+                    return set()
+                return self._coerce_allow_list(raw)
             if source in os.environ:
                 return self._coerce_allow_list(os.environ.get(source, ""))
             # Key removed (e.g. sole-entry pairing revoke) — do not revive the

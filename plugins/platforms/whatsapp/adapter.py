@@ -284,7 +284,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.whatsapp_common import WhatsAppBehaviorMixin
+from gateway.platforms.whatsapp_common import WhatsAppBehaviorMixin, _env_carrier_is_scoped
 from gateway.whatsapp_identity import to_whatsapp_jid
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -450,6 +450,10 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             self._dm_allowlist_source = None
             allow_raw = None
         self._allow_from = self._coerce_allow_list(allow_raw)
+        # Fork: remember whether that env carrier came from an installed profile
+        # secret scope, so live DM checks don't fall back to the process-global
+        # allowlist for a multiplexed profile.
+        self._dm_allowlist_scoped = _env_carrier_is_scoped(self._dm_allowlist_source)
         self._group_policy = str(config.extra.get("group_policy") or _wenv("WHATSAPP_GROUP_POLICY", "pairing")).strip().lower()
         # Fork: groups get the same config-then-env resolution as DMs above, so a
         # container configured purely through the environment can allowlist groups

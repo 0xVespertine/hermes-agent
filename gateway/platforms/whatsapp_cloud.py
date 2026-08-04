@@ -77,7 +77,11 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
-from gateway.platforms.whatsapp_common import WhatsAppBehaviorMixin, _get_wsecret
+from gateway.platforms.whatsapp_common import (
+    WhatsAppBehaviorMixin,
+    _env_carrier_is_scoped,
+    _get_wsecret,
+)
 from gateway.platforms.media_cache import ext_for_mime
 from gateway import rich_sent_store
 from hermes_constants import get_hermes_dir
@@ -277,6 +281,9 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
         self._allow_from: set[str] = self._normalize_allow_ids(
             self._coerce_allow_list(allow_raw)
         )
+        # Fork: same scope-provenance tracking as the bridge adapter — a
+        # scope-seeded allowlist must not be re-read from os.environ.
+        self._dm_allowlist_scoped = _env_carrier_is_scoped(self._dm_allowlist_source)
         # DM policy: explicit config wins; otherwise choose a safe, working
         # default -- "open" if the operator opted into allow-all, else
         # "allowlist" when an allowlist is configured (so it is actually
