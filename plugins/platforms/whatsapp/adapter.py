@@ -27,13 +27,33 @@ _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
 from typing import Dict, Optional, Any
 
-from agent.secret_scope import get_secret
 from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
 from hermes_constants import (
     find_node_executable,
     get_hermes_dir,
     with_hermes_node_path,
 )
+
+def _wenv(name: str, default: str = "") -> str:
+    """Read a WHATSAPP_* env var through the profile secret scope.
+
+    Under multiplexing, ``os.getenv`` bypasses the per-profile ``.env`` and
+    returns the process-global value (often unset), causing the bridge to
+    silently fall back to ``"self-chat"`` and reject all messages.
+    ``get_secret`` honors the active ``_profile_runtime_scope`` so secondary
+    profiles see their own credentials.
+    """
+    from agent.secret_scope import UnscopedSecretError, get_secret
+    try:
+        val = get_secret(name)
+    except UnscopedSecretError:
+        # DEFAULT profile's adapter constructs/connects outside any
+        # _profile_runtime_scope under multiplexing; os.environ is that
+        # profile's own value there. Same pattern as Slack SLACK_APP_TOKEN
+        # (#59739) and the Matrix recovery key. A *scoped* miss still
+        # returns the default (no cross-profile borrow).
+        val = os.getenv(name)
+    return val if val is not None else default
 
 logger = logging.getLogger(__name__)
 
@@ -360,18 +380,6 @@ def check_whatsapp_requirements() -> bool:
         return False
 
 
-def _resolve_allow_list_source(
-    config_extra: Dict[str, Any],
-    *config_keys: str,
-    env_var: str,
-) -> Any:
-    """Resolve an allowlist without overriding an explicit empty config value."""
-    for key in config_keys:
-        if key in config_extra:
-            return config_extra[key]
-    return get_secret(env_var)
-
-
 class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
     """
     WhatsApp adapter.
@@ -422,24 +430,38 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             get_hermes_dir("platforms/whatsapp/session", "whatsapp/session")
         ))
         self._reply_prefix: Optional[str] = config.extra.get("reply_prefix")
-        self._dm_policy = str(config.extra.get("dm_policy") or os.getenv("WHATSAPP_DM_POLICY", "pairing")).strip().lower()
-        self._allow_from = self._coerce_allow_list(
-            _resolve_allow_list_source(
-                config.extra,
-                "allow_from",
-                "allowFrom",
-                env_var="WHATSAPP_ALLOWED_USERS",
-            )
-        )
-        self._group_policy = str(config.extra.get("group_policy") or os.getenv("WHATSAPP_GROUP_POLICY", "pairing")).strip().lower()
-        self._group_allow_from = self._coerce_allow_list(
-            _resolve_allow_list_source(
-                config.extra,
-                "group_allow_from",
-                "groupAllowFrom",
-                env_var="WHATSAPP_GROUP_ALLOWED_USERS",
-            )
-        )
+        self._dm_policy = str(config.extra.get("dm_policy") or _wenv("WHATSAPP_DM_POLICY", "pairing")).strip().lower()
+        # Prefer config.extra, then the documented WHATSAPP_ALLOWED_USERS env
+        # (setup wizard / pairing mirror). Select by key *presence* so an
+        # explicit empty allow_from: [] stays authoritative and does not fall
+        # through to a lower-precedence env grant. Track which source won so
+        # live DM checks preserve that precedence. Env reads go through the
+        # profile secret scope (_wenv) so multiplexed profiles see their own.
+        if "allow_from" in config.extra:
+            self._dm_allowlist_source = "config"
+            allow_raw = config.extra.get("allow_from")
+        elif "allowFrom" in config.extra:
+            self._dm_allowlist_source = "config"
+            allow_raw = config.extra.get("allowFrom")
+        elif _wenv("WHATSAPP_ALLOWED_USERS"):
+            self._dm_allowlist_source = "WHATSAPP_ALLOWED_USERS"
+            allow_raw = _wenv("WHATSAPP_ALLOWED_USERS")
+        else:
+            self._dm_allowlist_source = None
+            allow_raw = None
+        self._allow_from = self._coerce_allow_list(allow_raw)
+        self._group_policy = str(config.extra.get("group_policy") or _wenv("WHATSAPP_GROUP_POLICY", "pairing")).strip().lower()
+        # Fork: groups get the same config-then-env resolution as DMs above, so a
+        # container configured purely through the environment can allowlist groups
+        # without a config file. Presence-keyed for the same reason: an explicit
+        # group_allow_from: [] must not fall through to an env grant.
+        if "group_allow_from" in config.extra:
+            group_raw = config.extra.get("group_allow_from")
+        elif "groupAllowFrom" in config.extra:
+            group_raw = config.extra.get("groupAllowFrom")
+        else:
+            group_raw = _wenv("WHATSAPP_GROUP_ALLOWED_USERS") or None
+        self._group_allow_from = self._coerce_allow_list(group_raw)
         read_receipts = config.extra.get("send_read_receipts", False)
         self._send_read_receipts = (
             read_receipts if isinstance(read_receipts, bool)
@@ -663,7 +685,7 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             # Start the bridge process in its own process group.
             # Route output to a log file so QR codes, errors, and reconnection
             # messages are preserved for troubleshooting.
-            whatsapp_mode = os.getenv("WHATSAPP_MODE", "self-chat")
+            whatsapp_mode = _wenv("WHATSAPP_MODE", "self-chat")
             self._bridge_log = self._session_path.parent / "bridge.log"
             bridge_log_fh = open(self._bridge_log, "a", encoding="utf-8")
             self._bridge_log_fh = bridge_log_fh
@@ -678,6 +700,30 @@ class WhatsAppAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             bridge_env["WHATSAPP_SEND_READ_RECEIPTS"] = (
                 "true" if self._send_read_receipts else "false"
             )
+            # Under multiplexing, the bridge subprocess runs with a copy of
+            # os.environ that does NOT contain the secondary profile's .env
+            # vars.  Inject the resolved WHATSAPP_* values so the Node bridge
+            # (which reads process.env.WHATSAPP_MODE etc.) sees the profile's
+            # own configuration instead of falling back to self-chat defaults.
+            _profile_wa_mode = _wenv("WHATSAPP_MODE", "self-chat")
+            if _profile_wa_mode:
+                bridge_env["WHATSAPP_MODE"] = _profile_wa_mode
+            for _key in (
+                "WHATSAPP_ALLOWED_USERS", "WHATSAPP_ALLOW_FROM",
+                "WHATSAPP_DM_POLICY", "WHATSAPP_GROUP_POLICY",
+                "WHATSAPP_GROUP_ALLOWED_USERS", "WHATSAPP_GROUP_ALLOW_FROM",
+                "WHATSAPP_REQUIRE_MENTION", "WHATSAPP_MENTION_PATTERNS",
+                "WHATSAPP_FREE_RESPONSE_CHATS",
+                # Full set bridge.js consumes -- without these a secondary
+                # profile's bridge silently reverts to defaults for debug,
+                # forwarding, prefixes, and send pacing.
+                "WHATSAPP_DEBUG", "WHATSAPP_FORWARD_OWNER_MESSAGES",
+                "WHATSAPP_REPLY_PREFIX", "WHATSAPP_MAX_MESSAGE_LENGTH",
+                "WHATSAPP_CHUNK_DELAY_MS", "WHATSAPP_SEND_TIMEOUT_MS",
+            ):
+                _v = _wenv(_key)
+                if _v:
+                    bridge_env[_key] = _v
             # Pass the profile-aware cache directories so the bridge writes
             # media where the Python side reads it.  Without these the bridge
             # hardcodes ~/.hermes/{image,audio,document}_cache, which diverges
