@@ -177,16 +177,78 @@ def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def discard_pending(subsystem: str, pending_id: str) -> bool:
-    """Delete a pending record. Returns True if it existed."""
+_OUTCOMES = ("approved", "rejected")
+
+
+def _archive_dir(subsystem: str, outcome: str) -> Path:
+    return _pending_dir(subsystem) / f".{outcome}"
+
+
+def discard_pending(subsystem: str, pending_id: str, *, outcome: str) -> bool:
+    """Archive a decided pending record. Returns True if it existed.
+
+    ``outcome`` is ``approved`` or ``rejected`` and is deliberately MANDATORY.
+    This function is called from both the approve path (after the write has
+    actually landed) and the reject path, so a defaulted label would silently
+    mislabel half the archive — and the archive exists precisely to be a
+    trustworthy corpus of what the reviewer proposed and what the user did with
+    it. A caller that omits it raises TypeError, which leaves the pending record
+    untouched on disk: the safe failure.
+
+    NOTE for upstream merges: if upstream adds a new ``discard_pending`` call
+    site, it will fail loudly here until given an explicit outcome. Intended.
+
+    Records move to ``pending/<subsystem>/.<outcome>/<id>.json`` with
+    ``decision`` / ``decided_at`` stamped in. Archive dirs are dotted
+    subdirectories, so ``list_pending`` and ``pending_count`` — which glob
+    ``*.json`` non-recursively — never pick them up.
+
+    This function never deletes a record. The move happens first and is atomic,
+    so the proposal's bytes survive even if everything after it fails; the
+    outcome is encoded in the destination directory, so the classification
+    survives a failed metadata stamp too. If the move itself fails, the record
+    is left pending and ``False`` is returned rather than dropped — for an
+    approved write that means the user may be shown it again, which the
+    duplicate guards in ``memory_tool`` / ``skill_manager_tool`` make a no-op.
+    """
+    if outcome not in _OUTCOMES:
+        raise ValueError(f"outcome must be one of {_OUTCOMES}, got {outcome!r}")
+
     path = _pending_dir(subsystem) / f"{pending_id}.json"
+    if not path.exists():
+        return False
+
+    dest = _archive_dir(subsystem, outcome) / f"{pending_id}.json"
     try:
-        if path.exists():
-            path.unlink()
-            return True
-    except Exception as e:  # pragma: no cover
-        logger.error("Failed to discard pending %s/%s: %s", subsystem, pending_id, e)
-    return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Move BEFORE touching the contents. Same filesystem (a subdirectory of
+        # the pending dir), so this is an atomic rename: the record is either
+        # pending or archived, never neither, and its original bytes are kept
+        # verbatim — including for a corrupt record, which is still evidence of
+        # what the reviewer emitted.
+        os.replace(path, dest)
+    except Exception as e:  # pragma: no cover - disk failure path
+        logger.error(
+            "Failed to archive pending %s/%s as %s: %s — record left pending",
+            subsystem, pending_id, outcome, e,
+        )
+        return False
+
+    # Metadata stamp is best-effort: failing it costs the decided_at timestamp,
+    # never the record.
+    try:
+        record = json.loads(dest.read_text(encoding="utf-8"))
+        record["decision"] = outcome
+        record["decided_at"] = time.time()
+        tmp = dest.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, dest)
+    except Exception as e:  # pragma: no cover - disk failure path
+        logger.warning(
+            "Archived %s/%s under .%s but could not stamp decision metadata: %s",
+            subsystem, pending_id, outcome, e,
+        )
+    return True
 
 
 def pending_count(subsystem: str) -> int:

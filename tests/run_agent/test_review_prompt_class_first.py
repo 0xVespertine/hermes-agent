@@ -1,36 +1,108 @@
 """Behavior tests for the skill review / combined review prompts.
 
-The review prompts steer the background review agent toward actively updating
-the skill library after most sessions, with a strong bias toward:
+The review prompts gate what the background review agent is allowed to
+propose. "Nothing to save." is the DEFAULT outcome: the reviewer runs after
+every turn, so a prompt that pushes it to act produces mostly noise for the
+user to reject. When it does act, it keeps a strong bias toward:
   1. Patching currently-loaded skills first,
   2. Patching existing umbrellas next,
   3. Adding references/ files under an existing umbrella,
   4. Creating a new class-level umbrella only when nothing else fits.
 
 User-preference corrections (style, format, verbosity, legibility) are
-first-class skill signals, not just memory signals.
+first-class skill signals, not just memory signals — they are also the one
+signal that is self-evidencing, since the correction is in the transcript.
 
 These tests assert behavioral *instructions* are present — they do NOT
 snapshot the full prompt text (change-detector).
 """
 
+import pytest
+
 from run_agent import AIAgent
+
+
+ACTING_PROMPTS = [
+    ("_SKILL_REVIEW_PROMPT", AIAgent._SKILL_REVIEW_PROMPT),
+    ("_COMBINED_REVIEW_PROMPT", AIAgent._COMBINED_REVIEW_PROMPT),
+    ("_MEMORY_REVIEW_PROMPT", AIAgent._MEMORY_REVIEW_PROMPT),
+]
+
+
+# ---------------------------------------------------------------------------
+# Output bias. The review fork used to be told "Be ACTIVE — most sessions
+# produce at least one skill update. A pass that does nothing is a missed
+# learning opportunity". That mandates output regardless of whether the
+# session contained anything worth saving, and with write_approval on it
+# lands as a queue of proposals the user has to reject by hand. The default
+# is now inaction; these tests are the tripwire against reintroducing it.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("label,prompt", ACTING_PROMPTS)
+def test_review_prompts_default_to_nothing_to_save(label, prompt):
+    """'Nothing to save.' must be stated as the DEFAULT, not a fallback."""
+    lower = prompt.lower()
+    assert "nothing to save." in lower, f"{label}: must offer the no-op reply verbatim"
+    assert "correct default" in lower, (
+        f"{label}: must name inaction as the correct default outcome"
+    )
+
+
+@pytest.mark.parametrize("label,prompt", ACTING_PROMPTS)
+def test_review_prompts_do_not_mandate_output(label, prompt):
+    """No prompt may frame a do-nothing pass as a failure or missed chance."""
+    lower = prompt.lower()
+    for banned in ("missed learning", "missed opportunity", "be active",
+                   "should not be the default", "not a neutral outcome"):
+        assert banned not in lower, (
+            f"{label}: must not pressure the reviewer to act ({banned!r})"
+        )
+
+
+@pytest.mark.parametrize("label,prompt", ACTING_PROMPTS)
+def test_review_prompts_require_evidence(label, prompt):
+    """Claims about databases/schemas/scripts/files need transcript evidence.
+
+    The review fork is whitelisted to memory + skill tools — no terminal, no
+    read_file, no SQL — so it cannot verify a factual claim it makes. The
+    prompt must forbid asserting one rather than leaving it to judgement.
+    """
+    lower = prompt.lower()
+    assert "cannot point to" in lower or "point to" in lower, (
+        f"{label}: must require the reviewer to point at its evidence"
+    )
+    # The two admissible sources, and only those two.
+    assert "conversation above" in lower or "transcript" in lower, (
+        f"{label}: must name the replayed conversation as an evidence source"
+    )
+
+
+@pytest.mark.parametrize("label,prompt", ACTING_PROMPTS)
+def test_review_prompts_skip_already_covered(label, prompt):
+    """Content already in SOUL.md / config / an existing skill is not a finding."""
+    lower = prompt.lower()
+    assert "soul.md" in lower, f"{label}: must name SOUL.md as pre-existing coverage"
+    assert "configuration" in lower or "config" in lower, (
+        f"{label}: must name configuration as pre-existing coverage"
+    )
+
+
+def test_acting_prompts_name_skill_view_as_evidence():
+    """skill_view output is admissible evidence — it is inside the whitelist.
+
+    Restricting evidence to the transcript alone would forbid patching a skill
+    the fork just read, which the read-before-write guard in
+    tools/skill_manager_tool.py actively requires it to do first.
+    """
+    for label, prompt in ACTING_PROMPTS[:2]:  # skill + combined touch skills
+        assert "skill_view" in prompt, (
+            f"{label}: must admit skill_view output as evidence"
+        )
 
 
 # ---------------------------------------------------------------------------
 # _SKILL_REVIEW_PROMPT
 # ---------------------------------------------------------------------------
-
-def test_skill_review_prompt_biases_toward_active_updates():
-    """Prompt must frame updating as the default stance, not something rare."""
-    prompt = AIAgent._SKILL_REVIEW_PROMPT
-    assert "ACTIVE" in prompt or "active" in prompt.lower(), (
-        "must tell the reviewer to be active"
-    )
-    # "missed learning opportunity" or equivalent framing for not acting
-    assert "missed" in prompt.lower() or "opportunity" in prompt.lower(), (
-        "must frame inaction as a miss, not a neutral outcome"
-    )
 
 
 def test_skill_review_prompt_treats_user_corrections_as_skill_signal():

@@ -126,7 +126,7 @@ def _approve(subsystem: str, rest: List[str], memory_store) -> str:
     for rec in targets:
         ok, msg = _apply_one(subsystem, rec, memory_store)
         if ok:
-            wa.discard_pending(subsystem, rec["id"])
+            wa.discard_pending(subsystem, rec["id"], outcome="approved")
             applied += 1
         else:
             failed.append(f"{rec['id']}: {msg}")
@@ -162,10 +162,10 @@ def _reject(subsystem: str, rest: List[str]) -> str:
     if target.lower() == "all":
         n = 0
         for rec in wa.list_pending(subsystem):
-            if wa.discard_pending(subsystem, rec["id"]):
+            if wa.discard_pending(subsystem, rec["id"], outcome="rejected"):
                 n += 1
         return f"Rejected {n} pending {subsystem} write(s)."
-    if wa.discard_pending(subsystem, target):
+    if wa.discard_pending(subsystem, target, outcome="rejected"):
         return f"Rejected pending {subsystem} write '{target}'."
     return f"No pending {subsystem} write with id '{target}'."
 

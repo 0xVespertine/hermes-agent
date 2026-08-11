@@ -83,6 +83,22 @@ ENTRY_DELIMITER = "\n§\n"
 from tools.threat_patterns import first_threat_message as _first_threat_message
 
 
+def _normalize_memory_entry(text: str) -> str:
+    """Fold a memory entry for duplicate detection: collapse whitespace only.
+
+    Deliberately NOT casefolded. Memory holds identifiers whose case is
+    load-bearing — usernames, hostnames, file paths, env vars, product names —
+    and folding case would merge two entries that differ in exactly the part
+    that matters. Whitespace is the only dimension that is reliably
+    insignificant in a short declarative sentence.
+
+    Do NOT reuse this for skill content: SKILL.md has structural YAML
+    frontmatter and skills ship scripts/ and templates/ files, so collapsing
+    whitespace there would classify a real indentation fix as a duplicate.
+    """
+    return " ".join(text.split())
+
+
 def _scan_memory_content(content: str) -> Optional[str]:
     """Scan memory content for injection/exfil patterns. Returns error string if blocked."""
     return _first_threat_message(content, scope="strict")
@@ -417,8 +433,14 @@ class MemoryStore:
             entries = self._entries_for(target)
             limit = self._char_limit(target)
 
-            # Reject exact duplicates
-            if content in entries:
+            # Reject duplicates that differ only in whitespace or casing. The
+            # background reviewer re-proposes the same fact across sessions with
+            # trivial rewording, and an exact-match check let every one of those
+            # through. Safe to normalize here because memory entries are short
+            # declarative sentences — skill files are compared byte-exact
+            # instead, see _skill_write_is_noop in tools/skill_manager_tool.py.
+            normalized = _normalize_memory_entry(content)
+            if any(_normalize_memory_entry(e) == normalized for e in entries):
                 return self._success_response(target, "Entry already exists (no duplicate added).")
 
             # Calculate what the new total would be

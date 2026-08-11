@@ -1428,6 +1428,81 @@ _skill_gate_bypass: "_ctxvars.ContextVar[bool]" = _ctxvars.ContextVar(
 )
 
 
+def _skill_write_is_noop(
+    action: str,
+    name: str,
+    *,
+    file_path: str = None,
+    file_content: str = None,
+    old_string: str = None,
+    new_string: str = None,
+    replace_all: bool = False,
+) -> bool:
+    """Return True when this write would leave the target file unchanged.
+
+    Exact comparison — no whitespace or case folding. Skill files carry YAML
+    frontmatter, shell commands and code templates, where indentation and case
+    are both semantic, so folding either would classify a real fix (a YAML
+    ``False`` -> ``false``, a re-indent) as a duplicate and refuse it. Only a
+    write that changes nothing is rejected; anything needing judgement is left
+    to the model.
+
+    Comparison is at the TEXT level, not the byte level, and that is
+    deliberate: ``atomic_write_text`` writes through a text-mode handle, so on
+    Windows a ``\\n`` in the model's content lands as ``\\r\\n`` on disk.
+    Comparing raw bytes would therefore report a difference for content that
+    the writer would normalize into the exact same file — reading both sides
+    with universal newlines asks the question that actually matters, "would
+    writing this produce the file that is already there?".
+
+    Runs BEFORE the write-approval gate: with approval on, the gate stages the
+    payload and the real mutation is deferred to replay time, which is too late
+    to spare the user the review. Best-effort — any resolution failure returns
+    False so the normal path produces the real, more specific error.
+    """
+    if action not in {"patch", "write_file"}:
+        return False
+    try:
+        existing = _find_skill(name)
+        if not existing:
+            return False
+        if action == "write_file":
+            if not file_path or file_content is None:
+                return False
+            target, err = _resolve_skill_target(existing["path"], file_path)
+            if err or target is None or not target.exists():
+                return False
+            return target.read_text(encoding="utf-8") == file_content
+
+        # patch
+        if not old_string or new_string is None:
+            return False
+        if old_string == new_string:
+            # fuzzy_find_and_replace rejects this too, but only once the handler
+            # runs — which under write_approval is after the payload has already
+            # been staged for the user to review. Catch it here instead.
+            return True
+        if file_path:
+            target, err = _resolve_skill_target(existing["path"], file_path)
+            if err or target is None:
+                return False
+        else:
+            target = existing["path"] / "SKILL.md"
+        if not target.exists():
+            return False
+        content = target.read_text(encoding="utf-8")
+        from tools.fuzzy_match import fuzzy_find_and_replace
+
+        new_content, _count, _strategy, match_error = fuzzy_find_and_replace(
+            content, old_string, new_string, replace_all
+        )
+        if match_error:
+            return False  # let the real handler report the match failure
+        return new_content == content
+    except Exception:
+        return False
+
+
 def _apply_skill_write_gate(action, name, **payload_kwargs):
     """Evaluate the skill write gate. Returns a JSON tool-result string when the
     write should NOT proceed (blocked or staged), or None to perform the real
@@ -1561,6 +1636,19 @@ def skill_manage(
     preflight = _background_review_preflight(action, name)
     if preflight is not None:
         return json.dumps(preflight, ensure_ascii=False)
+
+    # Zero-information writes are refused before the gate, so a proposal that
+    # changes nothing never reaches the user's pending queue.
+    if _skill_write_is_noop(
+        action, name, file_path=file_path, file_content=file_content,
+        old_string=old_string, new_string=new_string, replace_all=replace_all,
+    ):
+        label = file_path or "SKILL.md"
+        return tool_error(
+            f"No-op: '{label}' in skill '{name}' already has exactly this "
+            "content. Nothing was written — do not retry.",
+            success=False,
+        )
 
     # Approval gate: when on, stages the write for review (skills are too large
     # to review inline, so they always stage regardless of origin); when off
