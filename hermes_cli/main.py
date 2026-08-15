@@ -4382,6 +4382,7 @@ _LAZY_COMMAND_EXPORTS = {
         "_scan_dashboard_processes",
     ),
     "hermes_cli.update_cmd": (
+        "_abort_dependency_sync_if_self_locked",
         "_add_upstream_remote",
         "_atomic_replace_dir",
         "_capture_active_lazy_features",
@@ -4391,6 +4392,7 @@ _LAZY_COMMAND_EXPORTS = {
         "_cmd_update_impl",
         "_cold_start_windows_gateway_after_update",
         "_count_commits_between",
+        "_dependency_sync_would_rewrite",
         "_detect_self_loaded_native_modules",
         "_detect_venv_python_processes",
         "_defer_update_for_self_lock",
@@ -11813,7 +11815,12 @@ def main():
         help="1Password (op:// references) integration",
     )
 
-    # Lazy import — only pays for itself when this subcommand is actually used.
+    # Lazy-import secrets_cli: the module imports agent.secret_sources.bitwarden
+    # which loads cryptography._rust.pyd.  On Windows this maps the native
+    # extension into the updater process, causing the self-lock preflight to
+    # defer (#86781).  secrets_cli defers its backend import to first use
+    # (module-level __getattr__ + handler-level _load_bw()), so register_cli
+    # at parse time only wires argparse structure with no crypto cost.
     from hermes_cli import secrets_cli as _secrets_cli
     from hermes_cli import onepassword_secrets_cli as _op_secrets_cli
 
@@ -11822,14 +11829,10 @@ def main():
 
     def _dispatch_secrets(args):  # noqa: ANN001
         sub = getattr(args, "secrets_command", None)
-        bw_sub = getattr(args, "secrets_bw_command", None)
-        op_sub = getattr(args, "secrets_op_command", None)
-        if sub in ("bitwarden", "bw") and bw_sub is not None:
-            return args.func(args)
-        if sub in ("onepassword", "op", "1password") and op_sub is not None:
-            return args.func(args)
-        secrets_parser.print_help()
-        return 0
+        if sub is None:
+            secrets_parser.print_help()
+            return 0
+        return args.func(args)
 
     secrets_parser.set_defaults(func=_dispatch_secrets)
 
@@ -12681,6 +12684,16 @@ def main():
         "--include-archived",
         action="store_true",
         help="Also delete archived sessions (excluded by default)",
+    )
+    sessions_prune.add_argument(
+        "--never-active",
+        action="store_true",
+        help=(
+            "Instead of ended sessions, delete keyed gateway rows that were "
+            "opened and never used (no messages, tokens, tool calls or title) "
+            "and are older than AGE (default 30 days). Ordinary prune can "
+            "never reach these — it only ever selects ended sessions"
+        ),
     )
 
     sessions_archive = sessions_subparsers.add_parser(
