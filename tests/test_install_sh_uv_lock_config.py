@@ -30,6 +30,20 @@ def _locked_sync_helper(path: Path) -> str:
 def _bash_path(path: Path) -> str:
     if os.name != "nt":
         return str(path)
+    # Windows has two bash flavors with incompatible drive mappings: Git
+    # Bash/MSYS uses /c/..., WSL uses /mnt/c/.... shutil.which("bash") may find
+    # either, so ask cygpath (shipped with Git for Windows) when it is present
+    # and fall back to the WSL layout otherwise.
+    cygpath = shutil.which("cygpath")
+    if cygpath is not None:
+        converted = subprocess.run(
+            [cygpath, "-u", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if converted.returncode == 0 and converted.stdout.strip():
+            return converted.stdout.strip()
     drive = path.drive.rstrip(":").lower()
     tail = path.as_posix().split(":", 1)[1].lstrip("/")
     return f"/mnt/{drive}/{tail}"
