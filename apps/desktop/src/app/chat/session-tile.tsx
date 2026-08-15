@@ -149,7 +149,13 @@ function TileChat({
     activeSessionId: runtimeId,
     currentCwd: cwd,
     requestGateway,
-    scope: { add: attachments.add, remove: attachments.remove, target: scope.target }
+    scope: {
+      add: attachments.add,
+      remove: attachments.remove,
+      target: scope.target,
+      update: attachments.update,
+      updateIfCurrent: attachments.updateIfCurrent
+    }
   })
 
   // ChatView is memo()d — every callback prop must be referentially stable or
@@ -200,6 +206,7 @@ function TileChat({
           onAddUrl={onAddUrl}
           onAttachDroppedItems={composer.attachDroppedItems}
           onAttachImageBlob={composer.attachImageBlob}
+          onAttachPrCommentUrl={composer.attachPrCommentUrl}
           onCancel={actions.cancelRun}
           onDeleteSelectedSession={noop}
           onDismissError={actions.dismissError}
@@ -596,8 +603,7 @@ export const watchSessionTiles = paneMirror<SessionTile>({
   ),
   // Until the first turn lists a row there is no title to register, so the tab
   // takes its name from the composer instead — live, without re-registering.
-  tabTitle: storedSessionId =>
-    tileStoredRow(storedSessionId) ? null : <SessionDraftTitle scope={storedSessionId} />,
+  tabTitle: storedSessionId => (tileStoredRow(storedSessionId) ? null : <SessionDraftTitle scope={storedSessionId} />),
   render: storedSessionId => <SessionTilePane storedSessionId={storedSessionId} />,
   tabWrap: (storedSessionId, tab) => (
     <SessionTabMenu

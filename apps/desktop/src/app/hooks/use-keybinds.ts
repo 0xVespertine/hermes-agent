@@ -15,7 +15,7 @@ import {
 import { onReleaseTypingFocus } from '@/components/ui/keyboard-first'
 import { findBarClaimsCombo } from '@/lib/find-in-page'
 import { contributedKeybindHandler, PROFILE_SLOT_COUNT, SESSION_SLOT_COUNT } from '@/lib/keybinds/actions'
-import { comboAllowedInInput, comboFromEvent, isEditableTarget } from '@/lib/keybinds/combo'
+import { actionAllowedInInput, comboFromEvent, isEditableTarget } from '@/lib/keybinds/combo'
 import { composerFocusKeysAllowed, isComposerFocusSoftCombo, typeToFocusChar } from '@/lib/keybinds/composer-focus-keys'
 import { openWorktreeDialog } from '@/store/coding-status'
 import { toggleCommandPalette } from '@/store/command-palette'
@@ -62,6 +62,7 @@ import { openNewWindow } from '@/store/windows'
 import { useTheme } from '@/themes/context'
 
 import { requestComposerFocus, requestModelMenuToggle, requestVoiceToggle } from '../chat/composer/focus'
+import { handleWindowPaste } from '../chat/composer/paste-to-focus'
 import { openSession } from '../open-session'
 import {
   $workspaceIsPage,
@@ -86,6 +87,8 @@ export interface KeybindRuntimeDeps {
   openNewSessionTab: () => void
   /** Pin/unpin the active session. */
   toggleSelectedPin: () => void
+  /** Archive the active session. */
+  archiveSelectedSession: () => void
 }
 
 type HandlerMap = Record<string, () => void>
@@ -210,6 +213,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     ...sessionSlotHandlers,
     'session.focusSearch': requestSessionSearchFocus,
     'session.togglePin': deps.toggleSelectedPin,
+    'session.archive': deps.archiveSelectedSession,
     // openWorktreeDialog resolves the target. There is no test for a repo
     // here, so the key works from a detached session that sits inside a
     // project, and not only from a session with a repo. When no repo is in
@@ -291,6 +295,16 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      // An active IME composition owns the keyboard. Windows Chinese IMEs
+      // (Microsoft Pinyin, Sogou) use Ctrl+, as their punctuation-mode toggle,
+      // so without this guard that keystroke ALSO matched `nav.settings` and
+      // navigated away mid-word — unmounting the composer and destroying the
+      // unsent draft (#41079). The draft stash below makes navigation safe;
+      // this makes the IME keystroke not navigate at all.
+      if (event.isComposing) {
+        return
+      }
+
       // Capture mode: the next real key becomes the binding. Swallow everything
       // so e.g. ⌘K rebinds instead of opening the palette.
       const capturing = $capture.get()
@@ -357,7 +371,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
         return
       }
 
-      if (isEditableTarget(event.target) && !comboAllowedInInput(combo)) {
+      if (isEditableTarget(event.target) && !actionAllowedInInput(actionId, combo)) {
         return
       }
 
@@ -413,12 +427,17 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     window.addEventListener('keyup', onKeyUp, { capture: true })
     window.addEventListener('blur', onBlur)
     window.addEventListener('contextmenu', onContextMenu, { capture: true })
+    // Paste twin of type-to-focus: ⌘V on non-editable chrome routes the
+    // clipboard (text AND images) into the active composer. Bubble phase so
+    // editables' own paste handlers run first and mark the event handled.
+    window.addEventListener('paste', handleWindowPaste)
 
     return () => {
       window.removeEventListener('keydown', onKeyDown, { capture: true })
       window.removeEventListener('keyup', onKeyUp, { capture: true })
       window.removeEventListener('blur', onBlur)
       window.removeEventListener('contextmenu', onContextMenu, { capture: true })
+      window.removeEventListener('paste', handleWindowPaste)
     }
   }, [])
 }
